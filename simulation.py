@@ -6,9 +6,9 @@ from city import build_city, build_adjacency, dijkstra
 
 CAR_SPEED_MAIN = 88.0
 CAR_SPEED_SIDE = 46.0
-EV_SPEED = 120.0
+EV_SPEED = 130.0
 
-MAX_CARS = 300
+MAX_CARS = 1200
 
 LIGHT_GREEN_DUR = 14.0
 LIGHT_YELLOW_DUR = 3.0
@@ -16,42 +16,45 @@ LIGHT_ALLRED_DUR = 1.5
 
 LIGHT_STOP_DIST = 0.88
 
-MAIN_DEST_BIAS = 0.65
-
-#minimum gap between cars on same edge, as fraction of edge progress
-#cars will slow down to maintain this gap behind the car ahead
 CAR_MIN_GAP = 0.045
 
-#distance (in world units) at which a car starts pulling over for the EV
-EV_YIELD_RADIUS = 180.0
-#how much cars slow down when yielding (fraction of normal speed)
-EV_YIELD_SPEED_FACTOR = 0.18
+#how far ahead the EV preempts traffic lights (world units)
+EV_PREEMPT_RADIUS = 220.0
+#how far cars start pulling over for the EV
+EV_YIELD_RADIUS = 160.0
+EV_YIELD_SPEED_FACTOR = 0.15
+
+#how often to rebuild traffic-aware adj for car rerouting (seconds)
+ADJ_REBUILD_INTERVAL = 8.0
 
 
 class TrafficLight:
-    def __init__(self, lid, node_id, direction, phase_offset=0.0):
+    def __init__(self, lid, node_id, direction):
         self.id = lid
         self.node_id = node_id
         self.dir = direction
-        self._phase = "red"
+        self._state = "red"
         self._timer = 0.0
         self.override = None
-        self._state = "red"
-        self._boot_offset = phase_offset
+        #flag set by EV preemption so visualizer can highlight it differently
+        self.ev_preempted = False
 
     def tick(self, dt):
         if self.override is not None:
             state, rem = self.override
             rem -= dt
             self._state = state
-            self.override = (state, rem) if rem > 0 else None
-            return
-        self._timer -= dt
+            if rem <= 0:
+                self.override = None
+                self.ev_preempted = False
+            else:
+                self.override = (state, rem)
+        else:
+            self._timer -= dt
 
     def set_phase(self, phase, duration):
-        self._phase = phase
-        self._timer = duration
         self._state = phase
+        self._timer = duration
 
     def get_state(self):
         if self.override is not None:
@@ -63,8 +66,9 @@ class TrafficLight:
             return int(self.override[1])
         return max(0, int(self._timer))
 
-    def set_override(self, state, duration):
+    def set_override(self, state, duration, ev=False):
         self.override = (state, float(duration))
+        self.ev_preempted = ev
 
     def phase_expired(self):
         return self._timer <= 0 and self.override is None
@@ -72,12 +76,12 @@ class TrafficLight:
 
 class IntersectionController:
     PHASES = [
-        ("NS_green", LIGHT_GREEN_DUR),
+        ("NS_green",  LIGHT_GREEN_DUR),
         ("NS_yellow", LIGHT_YELLOW_DUR),
-        ("allred_1", LIGHT_ALLRED_DUR),
-        ("EW_green", LIGHT_GREEN_DUR),
+        ("allred_1",  LIGHT_ALLRED_DUR),
+        ("EW_green",  LIGHT_GREEN_DUR),
         ("EW_yellow", LIGHT_YELLOW_DUR),
-        ("allred_2", LIGHT_ALLRED_DUR),
+        ("allred_2",  LIGHT_ALLRED_DUR),
     ]
 
     def __init__(self, node_id, lights_by_dir, phase_offset=0.0):
@@ -115,7 +119,6 @@ class IntersectionController:
     def tick(self, dt):
         for lt in self.lights.values():
             lt.tick(dt)
-
         self._phase_timer -= dt
         if self._phase_timer <= 0:
             self._phase_idx = (self._phase_idx + 1) % len(self.PHASES)
@@ -128,6 +131,14 @@ class IntersectionController:
         if lt is None:
             return True
         return lt.get_state() == "green"
+
+    def preempt_for_ev(self, approach_dir):
+        """force all lights at this intersection to clear the way for EV approach direction"""
+        for d, lt in self.lights.items():
+            if d == approach_dir:
+                lt.set_override("green", LIGHT_GREEN_DUR + LIGHT_ALLRED_DUR, ev=True)
+            else:
+                lt.set_override("red", LIGHT_GREEN_DUR + LIGHT_ALLRED_DUR, ev=True)
 
 
 def approach_direction(from_node, to_node):
@@ -142,7 +153,7 @@ def approach_direction(from_node, to_node):
 class Car:
     _id_counter = 0
 
-    def __init__(self, node_a_id, node_b_id, node_map, edge_map, adj, main_nodes):
+    def __init__(self, node_a_id, node_b_id, node_map, edge_map, adj_ref, all_nodes):
         Car._id_counter += 1
         self.id = f"c{Car._id_counter}"
         self.node_a = node_a_id
@@ -150,19 +161,20 @@ class Car:
         self.progress = 0.0
         self.waiting = False
         self.yielding_to_ev = False
+        #yield_offset is a lateral offset fraction used by the visualizer to show pull-over
+        self.yield_offset = 0.0
 
         self.node_map = node_map
         self.edge_map = edge_map
-        self.adj = adj
-        self.main_nodes = main_nodes
+        self.adj_ref = adj_ref  #mutable reference: list of [adj_dict]
+        self.all_nodes = all_nodes
 
         self.route = []
         self.route_idx = 0
         self.lane = random.randint(1, 2)
 
         edge = edge_map.get((node_a_id, node_b_id))
-        self.speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
-        self._base_speed = self.speed
+        self._base_speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
 
     def set_route(self, route):
         self.route = route
@@ -172,13 +184,12 @@ class Car:
             self.node_b = route[1]
             self.progress = 0.0
             edge = self.edge_map.get((self.node_a, self.node_b))
-            self.speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
-            self._base_speed = self.speed
+            self._base_speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
 
     def reroute(self):
-        #pick a new random destination and reroute from current position
-        dest = random.choice(self.main_nodes)
-        route = dijkstra(self.adj, self.node_b, dest)
+        dest = random.choice(self.all_nodes)["id"]
+        #use current traffic-aware adj from the shared reference
+        route = dijkstra(self.adj_ref[0], self.node_b, dest)
         if len(route) >= 2:
             self.route = route
             self.route_idx = 0
@@ -186,8 +197,7 @@ class Car:
             self.node_b = route[1]
             self.progress = 0.0
             edge = self.edge_map.get((self.node_a, self.node_b))
-            self.speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
-            self._base_speed = self.speed
+            self._base_speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
 
     def get_xy(self):
         na = self.node_map.get(self.node_a)
@@ -215,6 +225,8 @@ class Car:
             "nb": self.node_b,
             "p": round(self.progress, 4),
             "lane": self.lane,
+            "yield": self.yielding_to_ev,
+            "yield_off": round(self.yield_offset, 3),
         }
 
 
@@ -255,21 +267,14 @@ class EmergencyVehicle:
         if self.done:
             return
 
-        #find the closest car ahead on same edge that hasn't yielded out of the way
-        #ev still can't teleport through a solid wall of unyielded cars
         ahead_progress = None
         for car in cars_on_edge:
             if car.progress > self.progress and not car.yielding_to_ev:
                 if ahead_progress is None or car.progress < ahead_progress:
                     ahead_progress = car.progress
 
-        #if something is blocking ahead that hasn't moved yet, slow down slightly
-        #but ev is aggressive so gap is smaller than for normal cars
-        EV_GAP = CAR_MIN_GAP * 0.5
-        if ahead_progress is not None and (ahead_progress - self.progress) < EV_GAP:
-            speed = EV_SPEED * 0.3
-        else:
-            speed = EV_SPEED
+        EV_GAP = CAR_MIN_GAP * 0.4
+        speed = EV_SPEED * 0.25 if (ahead_progress is not None and (ahead_progress - self.progress) < EV_GAP) else EV_SPEED
 
         self.progress += (speed * dt) / edge_length
         if self.progress >= 1.0:
@@ -300,7 +305,11 @@ class Simulation:
         self.edges = edges
         self.node_map = {n["id"]: n for n in nodes}
         self.edge_map = {(e["from"], e["to"]): e for e in edges}
-        self.adj = build_adjacency(nodes, edges)
+
+        #static adj for spawning (no traffic info yet)
+        static_adj = build_adjacency(nodes, edges)
+        #mutable shared reference so all cars always use the latest adj
+        self._adj_ref = [static_adj]
 
         self.main_nodes = [n["id"] for n in nodes if n["main"]]
         self.border_nodes = self._find_border_nodes()
@@ -313,6 +322,7 @@ class Simulation:
         self.ev: EmergencyVehicle | None = None
 
         self.last_tick = time.time()
+        self._last_adj_rebuild = time.time()
 
         while len(self.cars) < MAX_CARS:
             self._spawn_car()
@@ -339,22 +349,19 @@ class Simulation:
     def _find_border_nodes(self):
         from city import CITY_W, CITY_H
         border = [n["id"] for n in self.nodes
-                  if n["x"] < 130 or n["x"] > CITY_W - 130
-                  or n["y"] < 130 or n["y"] > CITY_H - 130]
-        return border if len(border) >= 4 else self.main_nodes[:]
-
-    def _random_destination(self, exclude_id):
-        pool = self.main_nodes if random.random() < MAIN_DEST_BIAS else [n["id"] for n in self.nodes]
-        pool = [nid for nid in pool if nid != exclude_id]
-        return random.choice(pool) if pool else exclude_id
+                  if n["x"] < 140 or n["x"] > CITY_W - 140
+                  or n["y"] < 140 or n["y"] > CITY_H - 140]
+        return border if len(border) >= 4 else [n["id"] for n in self.nodes]
 
     def _spawn_car(self):
         spawn = random.choice(self.border_nodes)
-        dest = self._random_destination(spawn)
-        route = dijkstra(self.adj, spawn, dest)
+        dest = random.choice(self.nodes)["id"]
+        if dest == spawn:
+            return
+        route = dijkstra(self._adj_ref[0], spawn, dest)
         if len(route) < 2:
             return
-        car = Car(route[0], route[1], self.node_map, self.edge_map, self.adj, self.main_nodes)
+        car = Car(route[0], route[1], self.node_map, self.edge_map, self._adj_ref, self.nodes)
         car.set_route(route)
         self.cars.append(car)
 
@@ -368,11 +375,9 @@ class Simulation:
         nb = self.node_map.get(car.node_b)
         if na is None or nb is None:
             return False
-        direction = approach_direction(na, nb)
-        return not ctrl.is_green_for_direction(direction)
+        return not ctrl.is_green_for_direction(approach_direction(na, nb))
 
     def _build_edge_index(self):
-        #group cars by which edge they're currently on for quick neighbor lookup
         idx: dict[tuple, list] = {}
         for car in self.cars:
             key = (car.node_a, car.node_b)
@@ -382,7 +387,6 @@ class Simulation:
         return idx
 
     def _check_ev_yield(self, car: Car) -> bool:
-        #car is within yield radius of the EV and the EV is heading toward the same node
         if self.ev is None:
             return False
         ex, ey = self.ev.get_xy()
@@ -390,44 +394,86 @@ class Simulation:
         dist = math.hypot(cx - ex, cy - ey)
         if dist > EV_YIELD_RADIUS:
             return False
-        #only yield if EV is approaching from behind or from a nearby parallel path
-        #simple check: EV is on the same edge or an adjacent one and is close
-        ev_edge = (self.ev.node_a, self.ev.node_b)
-        car_edge = (car.node_a, car.node_b)
-        if ev_edge == car_edge or self.ev.node_b == car.node_b:
+        #yield if on same edge or heading to same next node
+        if (self.ev.node_a, self.ev.node_b) == (car.node_a, car.node_b):
             return True
-        return dist < EV_YIELD_RADIUS * 0.55
+        if self.ev.node_b == car.node_b and dist < EV_YIELD_RADIUS * 0.7:
+            return True
+        return dist < EV_YIELD_RADIUS * 0.45
+
+    def _preempt_ev_lights(self):
+        """force green for the EV on all intersections it's approaching within radius"""
+        if self.ev is None:
+            return
+        ex, ey = self.ev.get_xy()
+        #look ahead through the next few route nodes
+        for step in range(min(3, len(self.ev.route) - self.ev.route_idx - 1)):
+            ahead_idx = self.ev.route_idx + 1 + step
+            if ahead_idx >= len(self.ev.route):
+                break
+            next_nid = self.ev.route[ahead_idx]
+            next_node = self.node_map.get(next_nid)
+            if next_node is None:
+                continue
+            dist = math.hypot(next_node["x"] - ex, next_node["y"] - ey)
+            if dist > EV_PREEMPT_RADIUS:
+                break
+            ctrl = self.intersections.get(next_nid)
+            if ctrl is None:
+                continue
+            #figure out the direction the EV is approaching from
+            if ahead_idx > 0:
+                prev_nid = self.ev.route[ahead_idx - 1]
+                prev_node = self.node_map.get(prev_nid)
+                if prev_node:
+                    dir_ = approach_direction(prev_node, next_node)
+                    ctrl.preempt_for_ev(dir_)
+
+    def _rebuild_traffic_adj(self):
+        densities = self.compute_densities()
+        new_adj = build_adjacency(self.nodes, self.edges, densities=densities)
+        self._adj_ref[0] = new_adj
 
     def tick(self):
         now = time.time()
         dt = min(now - self.last_tick, 0.15)
         self.last_tick = now
 
+        #rebuild traffic-aware routing adj periodically
+        if now - self._last_adj_rebuild > ADJ_REBUILD_INTERVAL:
+            self._rebuild_traffic_adj()
+            self._last_adj_rebuild = now
+
         for ctrl in self.intersections.values():
             ctrl.tick(dt)
+
+        #preempt lights ahead of EV every tick
+        self._preempt_ev_lights()
 
         edge_idx = self._build_edge_index()
 
         for car in self.cars:
-            #check if EV is nearby and car should yield
+            was_yielding = car.yielding_to_ev
             car.yielding_to_ev = self._check_ev_yield(car)
 
             if car.yielding_to_ev:
                 car.waiting = False
-                #pull over: move at reduced speed and stay near the edge
+                #animate yield_offset toward max pull-over position
+                car.yield_offset = min(1.0, car.yield_offset + dt * 2.5)
                 yield_speed = car._base_speed * EV_YIELD_SPEED_FACTOR
                 car.progress += (yield_speed * dt) / car.edge_length()
-                #clamp at 95% so the car parks near the end of the edge and waits
-                if car.progress >= 0.95:
-                    car.progress = 0.95
+                if car.progress >= 0.94:
+                    car.progress = 0.94
                 continue
+            else:
+                #smoothly return to normal lane
+                if car.yield_offset > 0:
+                    car.yield_offset = max(0.0, car.yield_offset - dt * 1.5)
 
-            #traffic light check
             if self._is_light_blocking(car):
                 car.waiting = True
                 continue
 
-            #car-following: find the closest car ahead on the same edge
             same_edge = edge_idx.get((car.node_a, car.node_b), [])
             ahead_progress = None
             for other in same_edge:
@@ -440,11 +486,9 @@ class Simulation:
             gap = (ahead_progress - car.progress) if ahead_progress is not None else 1.0
 
             if gap <= CAR_MIN_GAP:
-                #fully stopped, too close to car ahead
                 car.waiting = True
                 continue
             elif gap < CAR_MIN_GAP * 2.5:
-                #slow down proportionally as gap shrinks
                 t = (gap - CAR_MIN_GAP) / (CAR_MIN_GAP * 1.5)
                 effective_speed = car._base_speed * max(0.08, t)
             else:
@@ -457,15 +501,12 @@ class Simulation:
                 car.progress = 0.0
                 car.route_idx += 1
                 if car.route_idx >= len(car.route) - 1:
-                    #reached destination: pick a new one and keep driving
                     car.reroute()
                     continue
                 car.node_a = car.route[car.route_idx]
                 car.node_b = car.route[car.route_idx + 1]
                 edge = self.edge_map.get((car.node_a, car.node_b))
-                car.speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
-                car._base_speed = car.speed
-                #update edge index for next cars processed this tick
+                car._base_speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
                 key = (car.node_a, car.node_b)
                 if key not in edge_idx:
                     edge_idx[key] = []
@@ -482,7 +523,7 @@ class Simulation:
         return ev_done
 
     def start_route(self, from_id, to_id):
-        #if a secondary node id was passed directly, snap to nearest main node
+        #snap secondary nodes to nearest main node for EV route
         def to_main(nid):
             n = self.node_map.get(nid)
             if n and not n["main"]:
@@ -490,7 +531,7 @@ class Simulation:
             return nid
         from_id = to_main(from_id)
         to_id = to_main(to_id)
-        route = dijkstra(self.adj, from_id, to_id)
+        route = dijkstra(self._adj_ref[0], from_id, to_id)
         if len(route) < 2:
             print(f"no se encontro ruta de {from_id} a {to_id}")
             return False
@@ -503,7 +544,8 @@ class Simulation:
 
     def override_light(self, light_id, state, duration):
         lt = self.lights.get(light_id)
-        if lt: lt.set_override(state, duration)
+        if lt:
+            lt.set_override(state, duration)
 
     def nearest_node(self, x, y, main_only=False):
         best_id, best_d = None, float("inf")
@@ -516,8 +558,6 @@ class Simulation:
         return best_id
 
     def compute_densities(self):
-        #density based on average speed on each edge, not raw car count
-        #a road is "congested" when cars are slow, not just when there are many cars
         speed_sums: dict[str, float] = {}
         speed_counts: dict[str, int] = {}
         max_speeds: dict[str, float] = {}
@@ -533,10 +573,7 @@ class Simulation:
             eid = edge_id_map.get((car.node_a, car.node_b))
             if eid is None:
                 continue
-            if car.waiting or car.yielding_to_ev:
-                speed_sums[eid] += 0.0
-            else:
-                speed_sums[eid] += car._base_speed
+            speed_sums[eid] += 0.0 if (car.waiting or car.yielding_to_ev) else car._base_speed
             speed_counts[eid] += 1
 
         densities = {}
@@ -546,10 +583,8 @@ class Simulation:
             if count == 0:
                 densities[eid] = 0.0
             else:
-                avg_speed = speed_sums[eid] / count
-                free_flow = max_speeds[eid]
-                #density = how slow relative to free flow, 0 = free flow, 1 = standstill
-                densities[eid] = max(0.0, 1.0 - (avg_speed / free_flow))
+                avg = speed_sums[eid] / count
+                densities[eid] = max(0.0, 1.0 - (avg / max_speeds[eid]))
 
         return densities
 
@@ -564,6 +599,7 @@ class Simulation:
                 "dir": lt.dir,
                 "state": lt.get_state(),
                 "t": lt.get_timer(),
+                "ev": lt.ev_preempted,
             })
 
         traffic_data = [
