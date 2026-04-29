@@ -47,10 +47,10 @@ async def handle_command(raw: str, websocket):
         #soporte de coordenadas de mapa ademas de ids de nodo
         if msg.get("from_xy"):
             fx, fy = msg["from_xy"]
-            from_id = sim.nearest_node(fx, fy)
+            from_id = sim.nearest_node(fx, fy, main_only=True)
         if msg.get("to_xy"):
             tx, ty = msg["to_xy"]
-            to_id = sim.nearest_node(tx, ty)
+            to_id = sim.nearest_node(tx, ty, main_only=True)
         if from_id and to_id:
             ok = sim.start_route(from_id, to_id)
             if not ok:
