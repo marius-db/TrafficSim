@@ -151,7 +151,10 @@ class SimVisualizer:
     def _draw_edges(self, screen, sim, to_screen, scale, font_road):
         density_map = sim.compute_densities()
 
-        for e in sim.edges:
+        #sort edges so secondary roads are drawn first, main roads on top
+        sorted_edges = sorted(sim.edges, key=lambda e: (e.get("main", False), sim.edges.index(e)))
+
+        for e in sorted_edges:
             na = sim.node_map.get(e["from"])
             nb = sim.node_map.get(e["to"])
             if na is None or nb is None:
@@ -284,12 +287,46 @@ class SimVisualizer:
         car_w = max(3, int(9 * scale))
         car_h = max(2, int(4 * scale))
 
+        #build queue map: count cars ahead on each road segment
+        road_queue_pos = {}  #maps (node_a, node_b) -> {car_id: queue_position}
+        for car in sim.cars:
+            key = (car.node_a, car.node_b)
+            if key not in road_queue_pos:
+                road_queue_pos[key] = {}
+            road_queue_pos[key][car.id] = None
+        
+        #assign queue positions for cars on same road (closer to end = higher position)
+        for key, cars_dict in road_queue_pos.items():
+            car_list = [(car.progress, car_id) for car_id, car in [(cid, next(c for c in sim.cars if c.id == cid)) for cid in cars_dict.keys()]]
+            car_list.sort(reverse=True)  #sort by progress, descending
+            for queue_idx, (_, car_id) in enumerate(car_list):
+                cars_dict[car_id] = queue_idx
+
         for car in sim.cars:
             na = sim.node_map.get(car.node_a)
             nb = sim.node_map.get(car.node_b)
             if na is None or nb is None:
                 continue
-            sx, sy = to_screen(car.get_xy()[0], car.get_xy()[1])
+            
+            #get base position
+            base_x, base_y = car.get_xy()
+            edge_len = car.edge_length()
+            
+            #if car is waiting and there are cars ahead, back it up to show queue
+            if car.waiting:
+                key = (car.node_a, car.node_b)
+                queue_pos = road_queue_pos.get(key, {}).get(car.id, 0)
+                if queue_pos > 0:
+                    #back up by queue_pos * spacing along the road
+                    spacing = 0.035  #normalized spacing per car
+                    backup_progress = car.progress - (spacing * queue_pos)
+                    if backup_progress >= 0:
+                        dx = nb["x"] - na["x"]
+                        dy = nb["y"] - na["y"]
+                        base_x = na["x"] + dx * backup_progress
+                        base_y = na["y"] + dy * backup_progress
+            
+            sx, sy = to_screen(base_x, base_y)
             dx, dy = nb["x"] - na["x"], nb["y"] - na["y"]
             angle = math.atan2(dy, dx)
             perp_x = -math.sin(angle)

@@ -20,7 +20,7 @@ SIDE_NAMES = [
 ]
 
 
-def build_city(seed=42):
+def build_city(seed=123):
     rng = random.Random(seed)
 
     nodes = []
@@ -121,98 +121,105 @@ def build_city(seed=42):
         for direction in ["N", "S", "E", "W"]:
             lights.append({"id": lid(), "node": node_id, "dir": direction})
 
-    #secondary nodes: organic clusters inside blocks, connected to each other
-    #AND connected to the surrounding main intersections via access roads
-    #this is the key fix: side roads are NOT isolated, they connect to the main grid
+    #secondary roads: connect between main roads only
+    #collect all main road nodes (grid intersections)
+    main_road_nodes = list(spine_nodes.values())
     secondary_all = []
-
-    for ci in range(n_cols - 1):
-        for ri in range(n_rows - 1):
-            tl = get_n(spine_nodes[(ci, ri)])
-            tr = get_n(spine_nodes[(ci+1, ri)])
-            bl = get_n(spine_nodes[(ci, ri+1)])
-            br = get_n(spine_nodes[(ci+1, ri+1)])
-
-            block_w = ((tr["x"] + br["x"]) - (tl["x"] + bl["x"])) / 2
-            block_h = ((bl["y"] + br["y"]) - (tl["y"] + tr["y"])) / 2
-
-            if block_w > 165 or block_h > 165:
-                n_sec = rng.randint(2, 3)
-            elif block_w > 100 or block_h > 100:
-                n_sec = rng.randint(1, 2)
-            else:
-                n_sec = 1
-
-            block_secs = []
-            used_fracs = []
-
-            for _ in range(n_sec):
-                for attempt in range(14):
-                    fx = rng.uniform(0.2, 0.8)
-                    fy = rng.uniform(0.2, 0.8)
-                    if not any(math.hypot(fx - ux, fy - uy) < 0.3 for ux, uy in used_fracs):
-                        break
-                used_fracs.append((fx, fy))
-
-                cx = (tl["x"] * (1-fx) * (1-fy) + tr["x"] * fx * (1-fy)
-                      + bl["x"] * (1-fx) * fy + br["x"] * fx * fy)
-                cy = (tl["y"] * (1-fx) * (1-fy) + tr["y"] * fx * (1-fy)
-                      + bl["y"] * (1-fx) * fy + br["y"] * fx * fy)
-                cx += rng.randint(-12, 12)
-                cy += rng.randint(-12, 12)
-
-                min_x = min(tl["x"], tr["x"], bl["x"], br["x"]) + 14
-                max_x = max(tl["x"], tr["x"], bl["x"], br["x"]) - 14
-                min_y = min(tl["y"], tr["y"], bl["y"], br["y"]) + 14
-                max_y = max(tl["y"], tr["y"], bl["y"], br["y"]) - 14
-                if min_x < max_x: cx = max(min_x, min(max_x, cx))
-                if min_y < max_y: cy = max(min_y, min(max_y, cy))
-
-                sid = make_node(cx, cy, False)
-                block_secs.append(sid)
-                secondary_all.append(sid)
-
+    
+    #helper: check if line segment intersects with existing secondary road
+    def line_intersects_segment(p1, p2, seg_p1, seg_p2, tolerance=6.0):
+        """Check if line p1-p2 intersects segment seg_p1-seg_p2"""
+        def ccw(A, B, C):
+            return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
+        
+        #check segment intersection
+        if ccw(p1,seg_p1,seg_p2) != ccw(p2,seg_p1,seg_p2) and ccw(p1,p2,seg_p1) != ccw(p1,p2,seg_p2):
+            return True
+        return False
+    
+    #collect existing secondary road segments for intersection checking
+    secondary_segments = []  #list of (node1_pos, node2_pos, edge_id)
+    
+    #helper: find intersection point between two line segments
+    def find_intersection(p1, p2, p3, p4):
+        """Find intersection point of line segments p1-p2 and p3-p4"""
+        x1, y1 = p1
+        x2, y2 = p2
+        x3, y3 = p3
+        x4, y4 = p4
+        
+        denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
+        if abs(denom) < 1e-6:
+            return None
+        
+        t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
+        if 0 < t < 1:
+            ix = x1 + t*(x2-x1)
+            iy = y1 + t*(y2-y1)
+            return (ix, iy)
+        return None
+    
+    #generate secondary roads: connect nearby main road nodes
+    #with sparse, varied routing
+    MAX_SECONDARY_DIST = 200
+    used_pairs = set()
+    roads_per_node = {}  #track how many secondary roads connect to each main node
+    
+    for main_idx, main_node_id in enumerate(main_road_nodes):
+        mn = get_n(main_node_id)
+        
+        #find nearby main nodes to connect to
+        candidates = []
+        for other_idx, other_node_id in enumerate(main_road_nodes):
+            if main_idx >= other_idx:
+                continue
+            on = get_n(other_node_id)
+            dist = math.hypot(mn["x"] - on["x"], mn["y"] - on["y"])
+            if 80 < dist < MAX_SECONDARY_DIST and rng.random() < 0.15:
+                candidates.append((dist, other_idx, other_node_id, on))
+        
+        for dist, other_idx, other_node_id, on in sorted(candidates):
+            pair = (min(main_idx, other_idx), max(main_idx, other_idx))
+            if pair in used_pairs:
+                continue
+            
+            #create 1-3 intermediate nodes between the main roads
+            num_intermediate = rng.randint(1, 3)
+            path_nodes = [main_node_id]
+            
+            for step in range(num_intermediate):
+                t = (step + 1) / (num_intermediate + 1)
+                #add randomness perpendicular to direct line
+                mid_x = mn["x"] + (on["x"] - mn["x"]) * t
+                mid_y = mn["y"] + (on["y"] - mn["y"]) * t
+                
+                #perpendicular offset
+                dx = on["x"] - mn["x"]
+                dy = on["y"] - mn["y"]
+                length = math.hypot(dx, dy)
+                if length > 0:
+                    perp_x = -dy / length
+                    perp_y = dx / length
+                    offset = rng.uniform(-40, 40)
+                    mid_x += perp_x * offset
+                    mid_y += perp_y * offset
+                
+                #clamp to map bounds
+                mid_x = max(30, min(970, mid_x))
+                mid_y = max(30, min(750, mid_y))
+                
+                sec_id = make_node(mid_x, mid_y, False)
+                secondary_all.append(sec_id)
+                path_nodes.append(sec_id)
+            
+            path_nodes.append(other_node_id)
+            
+            #connect path nodes with roads
             sname = next_side()
-
-            #connect secondary nodes within block as a chain
-            for i in range(len(block_secs) - 1):
-                add_road(block_secs[i], block_secs[i+1], 1, False, sname)
-
-            #connect each secondary node to the nearest 1-2 main corners
-            #this is what allows cars to transition between side streets and main roads
-            corner_ids = [
-                spine_nodes[(ci, ri)], spine_nodes[(ci+1, ri)],
-                spine_nodes[(ci, ri+1)], spine_nodes[(ci+1, ri+1)]
-            ]
-            already = set()
-            for sid in block_secs:
-                sn = get_n(sid)
-                sorted_corners = sorted(corner_ids, key=lambda cid: math.hypot(
-                    get_n(cid)["x"] - sn["x"], get_n(cid)["y"] - sn["y"]))
-                #always connect to nearest corner
-                c1 = sorted_corners[0]
-                k1 = (min(sid, c1), max(sid, c1))
-                if k1 not in already:
-                    add_road(sid, c1, 1, False, sname)
-                    already.add(k1)
-                #50% chance to connect to second nearest
-                if rng.random() < 0.50:
-                    c2 = sorted_corners[1]
-                    k2 = (min(sid, c2), max(sid, c2))
-                    if k2 not in already:
-                        add_road(sid, c2, 1, False, sname)
-                        already.add(k2)
-
-    #cross-block secondary connections: side streets that pass through multiple blocks
-    #proximity-based: only connect if within reasonable distance
-    MAX_CROSS_DIST = 130
-    for i in range(len(secondary_all)):
-        sn_i = get_n(secondary_all[i])
-        for j in range(i+1, len(secondary_all)):
-            sn_j = get_n(secondary_all[j])
-            d = math.hypot(sn_i["x"] - sn_j["x"], sn_i["y"] - sn_j["y"])
-            if d < MAX_CROSS_DIST and rng.random() < 0.35:
-                add_road(secondary_all[i], secondary_all[j], 1, False, next_side())
+            for pi in range(len(path_nodes) - 1):
+                add_road(path_nodes[pi], path_nodes[pi+1], 1, False, sname)
+            
+            used_pairs.add(pair)
 
     return nodes, edges, lights
 

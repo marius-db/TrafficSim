@@ -8,7 +8,7 @@ CAR_SPEED_MAIN = 88.0
 CAR_SPEED_SIDE = 46.0
 EV_SPEED = 130.0
 
-MAX_CARS = 100
+MAX_CARS = 500
 
 LIGHT_GREEN_DUR = 14.0
 LIGHT_YELLOW_DUR = 3.0
@@ -172,6 +172,9 @@ class Car:
         self.route = []
         self.route_idx = 0
         self.lane = random.randint(1, 2)
+        
+        #random speed variance: ±12% (some cars faster, some slower)
+        self.speed_factor = random.uniform(0.88, 1.12)
 
         edge = edge_map.get((node_a_id, node_b_id))
         self._base_speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
@@ -322,6 +325,7 @@ class Simulation:
 
         self.last_tick = time.time()
         self._last_adj_rebuild = time.time()
+        self._density_smoothed = {}
 
     def _is_light_blocking(self, car):
         na = self.node_map.get(car.node_b)
@@ -331,7 +335,12 @@ class Simulation:
         if ctrl is None:
             return False
 
-        if car.progress < 1.0 - LIGHT_STOP_DIST:
+        #check lights starting from further back: either within 50 units OR last 15% of road
+        edge_len = car.edge_length()
+        normalized_stop_dist = LIGHT_STOP_DIST / edge_len
+        check_threshold = min(0.15, max(normalized_stop_dist, 50.0 / edge_len))
+        
+        if car.progress < 1.0 - check_threshold:
             return False
 
         prev_nid = car.node_a
@@ -409,7 +418,7 @@ class Simulation:
                 car.waiting = False
                 #animate yield_offset toward max pull-over position
                 car.yield_offset = min(1.0, car.yield_offset + dt * 2.5)
-                yield_speed = car._base_speed * EV_YIELD_SPEED_FACTOR
+                yield_speed = car._base_speed * EV_YIELD_SPEED_FACTOR * car.speed_factor
                 car.progress += (yield_speed * dt) / car.edge_length()
                 if car.progress >= 0.94:
                     car.progress = 0.94
@@ -432,6 +441,17 @@ class Simulation:
                     if ahead_progress is None or other.progress < ahead_progress:
                         ahead_progress = other.progress
 
+            #lookahead: if near end of current edge, check cars on next edge
+            if car.progress > 0.85 and car.route_idx + 1 < len(car.route) - 1:
+                next_edge_key = (car.route[car.route_idx + 1], car.route[car.route_idx + 2])
+                next_edge_cars = edge_idx.get(next_edge_key, [])
+                for other in next_edge_cars:
+                    if other.progress < 0.15:  #car very near start of next edge
+                        #pretend it's at 1.0 + their progress on next edge
+                        virtual_progress = 1.0 + other.progress
+                        if ahead_progress is None or virtual_progress < ahead_progress:
+                            ahead_progress = virtual_progress
+
             gap = (ahead_progress - car.progress) if ahead_progress is not None else 1.0
 
             if gap <= CAR_MIN_GAP:
@@ -444,22 +464,46 @@ class Simulation:
                 effective_speed = car._base_speed
 
             car.waiting = False
-            car.progress += (effective_speed * dt) / car.edge_length()
-
+            car.progress += (effective_speed * car.speed_factor * dt) / car.edge_length()
+            
+            #clamp to 1.0 to prevent snapping, check each frame if we can move to next edge
             if car.progress >= 1.0:
-                car.progress = 0.0
-                car.route_idx += 1
-                if car.route_idx >= len(car.route) - 1:
-                    car.reroute()
-                    continue
-                car.node_a = car.route[car.route_idx]
-                car.node_b = car.route[car.route_idx + 1]
-                edge = self.edge_map.get((car.node_a, car.node_b))
-                car._base_speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
-                key = (car.node_a, car.node_b)
-                if key not in edge_idx:
-                    edge_idx[key] = []
-                edge_idx[key].append(car)
+                car.progress = 1.0
+                #only transition to next edge if destination intersection is clear
+                if car.route_idx + 1 < len(car.route) - 1:
+                    next_node_a = car.route[car.route_idx + 1]
+                    next_node_b = car.route[car.route_idx + 2]
+                    next_edge_key = (next_node_a, next_node_b)
+                    next_edge_cars = edge_idx.get(next_edge_key, [])
+                    
+                    #check if next edge is clear (no car too close to start)
+                    next_clear = True
+                    for other in next_edge_cars:
+                        if other.progress < 0.1:  #car is at start of next edge
+                            next_clear = False
+                            break
+                    
+                    if next_clear:
+                        #safe to move to next edge
+                        car.progress = 0.0
+                        car.route_idx += 1
+                        if car.route_idx >= len(car.route) - 1:
+                            car.reroute()
+                            continue
+                        car.node_a = car.route[car.route_idx]
+                        car.node_b = car.route[car.route_idx + 1]
+                        edge = self.edge_map.get((car.node_a, car.node_b))
+                        car._base_speed = CAR_SPEED_MAIN if (edge and edge.get("main")) else CAR_SPEED_SIDE
+                        key = (car.node_a, car.node_b)
+                        if key not in edge_idx:
+                            edge_idx[key] = []
+                        edge_idx[key].append(car)
+                else:
+                    #end of route, reroute
+                    car.route_idx += 1
+                    if car.route_idx >= len(car.route) - 1:
+                        car.reroute()
+                continue
 
         ev_done = False
         if self.ev is not None:
@@ -511,11 +555,13 @@ class Simulation:
     def compute_densities(self):
         speed_sums: dict[str, float] = {}
         speed_counts: dict[str, int] = {}
+        waiting_counts: dict[str, int] = {}
         max_speeds: dict[str, float] = {}
 
         for e in self.edges:
             speed_sums[e["id"]] = 0.0
             speed_counts[e["id"]] = 0
+            waiting_counts[e["id"]] = 0
             max_speeds[e["id"]] = CAR_SPEED_MAIN if e.get("main") else CAR_SPEED_SIDE
 
         edge_id_map = {(e["from"], e["to"]): e["id"] for e in self.edges}
@@ -524,18 +570,95 @@ class Simulation:
             eid = edge_id_map.get((car.node_a, car.node_b))
             if eid is None:
                 continue
-            speed_sums[eid] += 0.0 if (car.waiting or car.yielding_to_ev) else car._base_speed
+            
+            #mark as waiting if: stopped at light OR barely moving (congested)
+            is_waiting = car.waiting or car.yielding_to_ev
+            
+            #also count cars as waiting if they're very close to destination (95%+ progress)
+            #this catches congestion at intersections without lights
+            if car.progress > 0.95:
+                is_waiting = True
+            
+            speed_sums[eid] += 0.0 if is_waiting else car._base_speed
             speed_counts[eid] += 1
+            if is_waiting:
+                waiting_counts[eid] += 1
 
-        densities = {}
+        #calcular densidad cruda y aplicar suavizado exponencial
+        alpha = 0.25  #0.25 para persistencia visual (decae en ~2 segundos)
+        raw_densities = {}
         for e in self.edges:
             eid = e["id"]
             count = speed_counts[eid]
             if count == 0:
-                densities[eid] = 0.0
+                raw_densities[eid] = 0.0
             else:
                 avg = speed_sums[eid] / count
-                densities[eid] = max(0.0, 1.0 - (avg / max_speeds[eid]))
+                max_speed = max_speeds[eid]
+                
+                #speed degradation: 0 = full speed, 1 = standstill
+                speed_factor = max(0.0, 1.0 - (avg / max_speed))
+                
+                #vehicle density: cars per unit length (normalized)
+                #more sensitive: even a few cars should show some color
+                edge_obj = self.edge_map.get((e["from"], e["to"]))
+                if edge_obj:
+                    edge_len = max(1.0, math.hypot(
+                        self.node_map[e["to"]]["x"] - self.node_map[e["from"]]["x"],
+                        self.node_map[e["to"]]["y"] - self.node_map[e["from"]]["y"]
+                    ))
+                    #capacity: 1 car per ~30 units = visible, 5+ cars = full
+                    vehicle_density = min(1.0, (count * 30.0) / edge_len)
+                else:
+                    vehicle_density = count / 10.0  #fallback
+                
+                #minimum presence: any car on road adds at least 0.05 density (slight color)
+                min_presence = 0.05 if count > 0 else 0.0
+                
+                #smooth waiting car-based signalling with interpolation
+                #key points: (waiting_count, density_value)
+                waiting = waiting_counts[eid]
+                waiting_points = [
+                    (0, 0.0),      #no cars
+                    (2, 0.25),     #barely yellow
+                    (4, 0.48),     #yellow
+                    (7, 0.70),     #yellow to red
+                    (10, 0.95),    #red
+                ]
+                
+                #interpolate between key points
+                waiting_density = 0.0
+                if waiting > 0:
+                    for i in range(len(waiting_points) - 1):
+                        w1, d1 = waiting_points[i]
+                        w2, d2 = waiting_points[i + 1]
+                        if w1 <= waiting <= w2:
+                            #linear interpolation
+                            t = (waiting - w1) / (w2 - w1) if w2 > w1 else 0.0
+                            waiting_density = d1 + (d2 - d1) * t
+                            break
+                    else:
+                        #beyond last point
+                        waiting_density = waiting_points[-1][1]
+                
+                #combine: prioritize waiting car signal, but also consider speed/vehicle flow
+                #if many cars are actually waiting, let that dominate; otherwise use speed/density
+                if waiting > 0:
+                    raw_densities[eid] = (waiting_density * 0.8) + (speed_factor * 0.2)
+                else:
+                    #boost vehicle presence more when no waiting: 60% speed, 40% presence
+                    #but ensure minimum visibility if cars are present
+                    raw_densities[eid] = max(min_presence, (speed_factor * 0.6) + (vehicle_density * 0.4))
+
+        #suavizar con media movil exponencial
+        densities = {}
+        for e in self.edges:
+            eid = e["id"]
+            prev_smooth = self._density_smoothed.get(eid, 0.0)
+            raw = raw_densities[eid]
+            smoothed = alpha * raw + (1.0 - alpha) * prev_smooth
+            self._density_smoothed[eid] = smoothed
+            densities[eid] = smoothed
 
         return densities
 
