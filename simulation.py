@@ -8,7 +8,7 @@ CAR_SPEED_MAIN = 88.0
 CAR_SPEED_SIDE = 46.0
 EV_SPEED = 130.0
 
-MAX_CARS = 600
+MAX_CARS = 100
 
 LIGHT_GREEN_DUR = 14.0
 LIGHT_YELLOW_DUR = 3.0
@@ -133,7 +133,7 @@ class IntersectionController:
         return lt.get_state() == "green"
 
     def preempt_for_ev(self, approach_dir):
-        """force all lights at this intersection to clear the way for EV approach direction"""
+        #force all lights at this intersection to clear the way for EV approach direction
         for d, lt in self.lights.items():
             if d == approach_dir:
                 lt.set_override("green", LIGHT_GREEN_DUR + LIGHT_ALLRED_DUR, ev=True)
@@ -225,29 +225,23 @@ class Car:
             "nb": self.node_b,
             "p": round(self.progress, 4),
             "lane": self.lane,
-            "yield": self.yielding_to_ev,
-            "yield_off": round(self.yield_offset, 3),
+            "waiting": self.waiting,
+            "yielding": self.yielding_to_ev,
         }
 
 
 class EmergencyVehicle:
-    def __init__(self, from_id, to_id, route, node_map):
-        self.from_id = from_id
-        self.to_id = to_id
+    def __init__(self, start_id, end_id, route, node_map):
+        self.id = "ev1"
+        self.start_id = start_id
+        self.end_id = end_id
         self.route = route
         self.node_map = node_map
-        self.route_idx = 0
         self.node_a = route[0]
-        self.node_b = route[1] if len(route) > 1 else route[0]
+        self.node_b = route[1]
+        self.route_idx = 0
         self.progress = 0.0
         self.done = False
-
-    def edge_length(self):
-        na = self.node_map.get(self.node_a)
-        nb = self.node_map.get(self.node_b)
-        if na is None or nb is None:
-            return 1.0
-        return max(1.0, math.hypot(nb["x"] - na["x"], nb["y"] - na["y"]))
 
     def get_xy(self):
         na = self.node_map.get(self.node_a)
@@ -258,25 +252,16 @@ class EmergencyVehicle:
         y = na["y"] + (nb["y"] - na["y"]) * self.progress
         return x, y
 
-    def next_node(self):
-        if self.route_idx + 1 < len(self.route):
-            return self.route[self.route_idx + 1]
-        return self.to_id
+    def edge_length(self):
+        na = self.node_map.get(self.node_a)
+        nb = self.node_map.get(self.node_b)
+        if na is None or nb is None:
+            return 1.0
+        return max(1.0, math.hypot(nb["x"] - na["x"], nb["y"] - na["y"]))
 
-    def tick(self, dt, cars_on_edge, edge_length):
-        if self.done:
-            return
+    def tick(self, dt, same_edge_cars, edge_len):
+        self.progress += (EV_SPEED * dt) / edge_len
 
-        ahead_progress = None
-        for car in cars_on_edge:
-            if car.progress > self.progress and not car.yielding_to_ev:
-                if ahead_progress is None or car.progress < ahead_progress:
-                    ahead_progress = car.progress
-
-        EV_GAP = CAR_MIN_GAP * 0.4
-        speed = EV_SPEED * 0.25 if (ahead_progress is not None and (ahead_progress - self.progress) < EV_GAP) else EV_SPEED
-
-        self.progress += (speed * dt) / edge_length
         if self.progress >= 1.0:
             self.progress = 0.0
             self.route_idx += 1
@@ -289,120 +274,84 @@ class EmergencyVehicle:
     def to_dict(self):
         x, y = self.get_xy()
         return {
-            "id": "ev1",
+            "id": self.id,
             "x": round(x, 2),
             "y": round(y, 2),
-            "next": self.next_node(),
+            "na": self.node_a,
+            "nb": self.node_b,
+            "p": round(self.progress, 4),
             "route": self.route,
+            "route_idx": self.route_idx,
         }
 
 
 class Simulation:
     def __init__(self):
-        nodes, edges, light_defs = build_city()
+        self.nodes, self.edges, lights_list = build_city()
+        self.node_map = {n["id"]: n for n in self.nodes}
+        self.edge_map = {(e["from"], e["to"]): e for e in self.edges}
+        self._adj_ref = [build_adjacency(self.nodes, self.edges)]
+        self.cars = []
+        self.ev = None
 
-        self.nodes = nodes
-        self.edges = edges
-        self.node_map = {n["id"]: n for n in nodes}
-        self.edge_map = {(e["from"], e["to"]): e for e in edges}
+        self.lights = {}
+        for lt_data in lights_list:
+            lt = TrafficLight(lt_data["id"], lt_data["node"], lt_data["dir"])
+            self.lights[lt.id] = lt
 
-        #static adj for spawning (no traffic info yet)
-        static_adj = build_adjacency(nodes, edges)
-        #mutable shared reference so all cars always use the latest adj
-        self._adj_ref = [static_adj]
+        self.intersections = {}
+        for nid in self.node_map:
+            lights_at_node = {}
+            for lt in self.lights.values():
+                if lt.node_id == nid:
+                    lights_at_node[lt.dir] = lt
+            if lights_at_node:
+                phase_offset = random.uniform(0, 30)
+                self.intersections[nid] = IntersectionController(nid, lights_at_node, phase_offset)
 
-        self.main_nodes = [n["id"] for n in nodes if n["main"]]
-        self.border_nodes = self._find_border_nodes()
-
-        self.lights: dict[str, TrafficLight] = {}
-        self.intersections: dict[str, IntersectionController] = {}
-        self._build_intersections(light_defs)
-
-        self.cars: list[Car] = []
-        self.ev: EmergencyVehicle | None = None
+        #spawn initial traffic
+        for _ in range(MAX_CARS):
+            a_node = random.choice(self.nodes)
+            b_node = random.choice(self.nodes)
+            if a_node["id"] != b_node["id"]:
+                car = Car(a_node["id"], b_node["id"], self.node_map, self.edge_map, self._adj_ref, self.nodes)
+                route = dijkstra(self._adj_ref[0], a_node["id"], b_node["id"])
+                if len(route) >= 2:
+                    car.set_route(route)
+                    self.cars.append(car)
 
         self.last_tick = time.time()
         self._last_adj_rebuild = time.time()
 
-        while len(self.cars) < MAX_CARS:
-            self._spawn_car()
-
-    def _build_intersections(self, light_defs):
-        rng = random.Random(99)
-        total_cycle = sum(d for _, d in IntersectionController.PHASES)
-
-        by_node: dict[str, dict] = {}
-        for ld in light_defs:
-            nid = ld["node"]
-            d = ld["dir"]
-            lt = TrafficLight(ld["id"], nid, d)
-            self.lights[ld["id"]] = lt
-            if nid not in by_node:
-                by_node[nid] = {}
-            by_node[nid][d] = lt
-
-        for node_id, lights_by_dir in by_node.items():
-            offset = rng.uniform(0, total_cycle)
-            ctrl = IntersectionController(node_id, lights_by_dir, phase_offset=offset)
-            self.intersections[node_id] = ctrl
-
-    def _find_border_nodes(self):
-        from city import CITY_W, CITY_H
-        border = [n["id"] for n in self.nodes
-                  if n["x"] < 140 or n["x"] > CITY_W - 140
-                  or n["y"] < 140 or n["y"] > CITY_H - 140]
-        return border if len(border) >= 4 else [n["id"] for n in self.nodes]
-
-    def _spawn_car(self):
-        spawn = random.choice(self.border_nodes)
-        dest = random.choice(self.nodes)["id"]
-        if dest == spawn:
-            return
-        route = dijkstra(self._adj_ref[0], spawn, dest)
-        if len(route) < 2:
-            return
-        car = Car(route[0], route[1], self.node_map, self.edge_map, self._adj_ref, self.nodes)
-        car.set_route(route)
-        self.cars.append(car)
-
-    def _is_light_blocking(self, car: Car) -> bool:
-        if car.progress < LIGHT_STOP_DIST:
+    def _is_light_blocking(self, car):
+        na = self.node_map.get(car.node_b)
+        if na is None:
             return False
         ctrl = self.intersections.get(car.node_b)
         if ctrl is None:
             return False
-        na = self.node_map.get(car.node_a)
-        nb = self.node_map.get(car.node_b)
-        if na is None or nb is None:
+
+        if car.progress < 1.0 - LIGHT_STOP_DIST:
             return False
-        return not ctrl.is_green_for_direction(approach_direction(na, nb))
 
-    def _build_edge_index(self):
-        idx: dict[tuple, list] = {}
-        for car in self.cars:
-            key = (car.node_a, car.node_b)
-            if key not in idx:
-                idx[key] = []
-            idx[key].append(car)
-        return idx
+        prev_nid = car.node_a
+        prev_node = self.node_map.get(prev_nid)
+        if prev_node is None:
+            return False
 
-    def _check_ev_yield(self, car: Car) -> bool:
+        approach_dir = approach_direction(prev_node, na)
+        return not ctrl.is_green_for_direction(approach_dir)
+
+    def _check_ev_yield(self, car):
         if self.ev is None:
             return False
         ex, ey = self.ev.get_xy()
         cx, cy = car.get_xy()
-        dist = math.hypot(cx - ex, cy - ey)
-        if dist > EV_YIELD_RADIUS:
-            return False
-        #yield if on same edge or heading to same next node
-        if (self.ev.node_a, self.ev.node_b) == (car.node_a, car.node_b):
-            return True
-        if self.ev.node_b == car.node_b and dist < EV_YIELD_RADIUS * 0.7:
-            return True
-        return dist < EV_YIELD_RADIUS * 0.45
+        dist = math.hypot(ex - cx, ey - cy)
+        return dist < EV_YIELD_RADIUS
 
     def _preempt_ev_lights(self):
-        """force green for the EV on all intersections it's approaching within radius"""
+        #force green for the EV on all intersections it's approaching within radius
         if self.ev is None:
             return
         ex, ey = self.ev.get_xy()
@@ -523,14 +472,16 @@ class Simulation:
         return ev_done
 
     def start_route(self, from_id, to_id):
-        #snap secondary nodes to nearest main node for EV route
-        def to_main(nid):
-            n = self.node_map.get(nid)
-            if n and not n["main"]:
-                return self.nearest_node(n["x"], n["y"], main_only=True)
-            return nid
-        from_id = to_main(from_id)
-        to_id = to_main(to_id)
+        #find nearest node (main or secondary) to the given coordinates
+        #if from_id or to_id are already valid node ids, use them directly
+        from_node = self.node_map.get(from_id)
+        to_node = self.node_map.get(to_id)
+        
+        if from_node is None:
+            return False
+        if to_node is None:
+            return False
+
         route = dijkstra(self._adj_ref[0], from_id, to_id)
         if len(route) < 2:
             print(f"no se encontro ruta de {from_id} a {to_id}")
@@ -627,3 +578,12 @@ class Simulation:
             "edges": self.edges,
             "lights": lights_data,
         }
+
+    def _build_edge_index(self):
+        edge_idx = {}
+        for car in self.cars:
+            key = (car.node_a, car.node_b)
+            if key not in edge_idx:
+                edge_idx[key] = []
+            edge_idx[key].append(car)
+        return edge_idx
