@@ -76,8 +76,8 @@ def build_city(seed=123):
     def get_n(id_):
         return node_map_local.get(id_)
 
-    #main grid: deliberately uneven column/row spacing to break uniform look
-    #gaps vary a lot between columns so some blocks are wide, some cramped
+    #cuadricula principal: espaciado entre columnas y filas intencionalmente irregular para romper la uniformidad
+    #los huecos varían mucho entre columnas para que algunos bloques sean anchos y otros estrechos
     col_xs = [55, 160, 270, 400, 510, 640, 740, 855, 955]
     row_ys  = [60, 175, 310, 435, 560, 680, 755]
 
@@ -93,7 +93,7 @@ def build_city(seed=123):
             jy = rng.randint(-5, 5) if border else rng.randint(-24, 24)
             spine_nodes[(ci, ri)] = make_node(bx + jx, by + jy, True)
 
-    #horizontal connections with ~12% gaps
+    #conexiones horizontales con ~12% de huecos
     for ri in range(n_rows):
         sname = next_main()
         for ci in range(n_cols - 1):
@@ -101,7 +101,7 @@ def build_city(seed=123):
                 continue
             add_road(spine_nodes[(ci, ri)], spine_nodes[(ci+1, ri)], 3, True, sname)
 
-    #vertical connections with ~12% gaps
+    #conexiones verticales con ~12% de huecos
     for ci in range(n_cols):
         sname = next_main()
         for ri in range(n_rows - 1):
@@ -109,7 +109,7 @@ def build_city(seed=123):
                 continue
             add_road(spine_nodes[(ci, ri)], spine_nodes[(ci, ri+1)], 3, True, sname)
 
-    #diagonal shortcuts: ~20% of blocks get a cut-through avenue
+    #atajos diagonales: ~20% de los bloques reciben una avenida de paso
     for ci in range(n_cols - 1):
         for ri in range(n_rows - 1):
             if rng.random() < 0.20:
@@ -121,28 +121,28 @@ def build_city(seed=123):
         for direction in ["N", "S", "E", "W"]:
             lights.append({"id": lid(), "node": node_id, "dir": direction})
 
-    #secondary roads: connect between main roads only
-    #collect all main road nodes (grid intersections)
+    #calles secundarias: solo conectan nodos de la cuadricula principal
+    #recopilar todos los nodos de calles principales (intersecciones de la cuadricula)
     main_road_nodes = list(spine_nodes.values())
     secondary_all = []
     
-    #helper: check if line segment intersects with existing secondary road
+    #auxiliar: comprueba si un segmento intersecta con una calle secundaria existente
+    #comprueba si la linea p1-p2 intersecta el segmento seg_p1-seg_p2
     def line_intersects_segment(p1, p2, seg_p1, seg_p2, tolerance=6.0):
-        """Check if line p1-p2 intersects segment seg_p1-seg_p2"""
         def ccw(A, B, C):
             return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
         
-        #check segment intersection
+        #comprobar interseccion de segmentos
         if ccw(p1,seg_p1,seg_p2) != ccw(p2,seg_p1,seg_p2) and ccw(p1,p2,seg_p1) != ccw(p1,p2,seg_p2):
             return True
         return False
     
-    #collect existing secondary road segments for intersection checking
-    secondary_segments = []  #list of (node1_pos, node2_pos, edge_id)
+    #recopilar segmentos de calles secundarias existentes para comprobacion de intersecciones
+    secondary_segments = []  #lista de (posicion_nodo1, posicion_nodo2, id_arista)
     
-    #helper: find intersection point between two line segments
+    #auxiliar: encuentra el punto de interseccion entre dos segmentos de linea
+    #encuentra el punto de interseccion de los segmentos p1-p2 y p3-p4
     def find_intersection(p1, p2, p3, p4):
-        """Find intersection point of line segments p1-p2 and p3-p4"""
         x1, y1 = p1
         x2, y2 = p2
         x3, y3 = p3
@@ -159,16 +159,16 @@ def build_city(seed=123):
             return (ix, iy)
         return None
     
-    #generate secondary roads: connect nearby main road nodes
-    #with sparse, varied routing
+    #generar calles secundarias: conectar nodos cercanos de la cuadricula principal
+    #con rutas dispersas y variadas
     MAX_SECONDARY_DIST = 200
     used_pairs = set()
-    roads_per_node = {}  #track how many secondary roads connect to each main node
+    roads_per_node = {}  #controlar cuantas calles secundarias conectan a cada nodo principal
     
     for main_idx, main_node_id in enumerate(main_road_nodes):
         mn = get_n(main_node_id)
         
-        #find nearby main nodes to connect to
+        #buscar nodos principales cercanos a los que conectar
         candidates = []
         for other_idx, other_node_id in enumerate(main_road_nodes):
             if main_idx >= other_idx:
@@ -183,17 +183,17 @@ def build_city(seed=123):
             if pair in used_pairs:
                 continue
             
-            #create 1-3 intermediate nodes between the main roads
+            #crear entre 1 y 3 nodos intermedios entre las calles principales
             num_intermediate = rng.randint(1, 3)
             path_nodes = [main_node_id]
             
             for step in range(num_intermediate):
                 t = (step + 1) / (num_intermediate + 1)
-                #add randomness perpendicular to direct line
+                #añadir aleatoriedad perpendicular a la linea directa
                 mid_x = mn["x"] + (on["x"] - mn["x"]) * t
                 mid_y = mn["y"] + (on["y"] - mn["y"]) * t
                 
-                #perpendicular offset
+                #desplazamiento perpendicular
                 dx = on["x"] - mn["x"]
                 dy = on["y"] - mn["y"]
                 length = math.hypot(dx, dy)
@@ -204,7 +204,7 @@ def build_city(seed=123):
                     mid_x += perp_x * offset
                     mid_y += perp_y * offset
                 
-                #clamp to map bounds
+                #limitar a los bordes del mapa
                 mid_x = max(30, min(970, mid_x))
                 mid_y = max(30, min(750, mid_y))
                 
@@ -214,7 +214,7 @@ def build_city(seed=123):
             
             path_nodes.append(other_node_id)
             
-            #connect path nodes with roads
+            #conectar los nodos del camino con calles
             sname = next_side()
             for pi in range(len(path_nodes) - 1):
                 add_road(path_nodes[pi], path_nodes[pi+1], 1, False, sname)
@@ -224,11 +224,9 @@ def build_city(seed=123):
     return nodes, edges, lights
 
 
+#enrutamiento con conciencia de trafico: si se pasan densidades, las calles congestionadas
+#tienen mayor coste, de modo que dijkstra evita naturalmente las calles saturadas
 def build_adjacency(nodes, edges, densities=None):
-    """
-    traffic-aware routing: if densities passed, congested roads cost more
-    so dijkstra naturally avoids jammed streets
-    """
     node_map = {n["id"]: n for n in nodes}
     adj = {n["id"]: [] for n in nodes}
 
@@ -243,7 +241,7 @@ def build_adjacency(nodes, edges, densities=None):
 
         if densities:
             d = densities.get(e["id"], 0.0)
-            #1x cost at free flow, up to 4x at standstill
+            #coste 1x en flujo libre, hasta 4x en parada total
             base_cost *= (1.0 + d * 3.0)
 
         adj[e["from"]].append((e["to"], base_cost, e["id"]))

@@ -1,8 +1,3 @@
-"""
-visualizador pygame de la simulacion de trafico.
-corre en un hilo daemon separado del loop asyncio del servidor.
-"""
-
 import math
 import threading
 import time
@@ -151,7 +146,7 @@ class SimVisualizer:
     def _draw_edges(self, screen, sim, to_screen, scale, font_road):
         density_map = sim.compute_densities()
 
-        #sort edges so secondary roads are drawn first, main roads on top
+        #ordena aristas para que carreteras secundarias se dibujen primero, principales arriba
         sorted_edges = sorted(sim.edges, key=lambda e: (e.get("main", False), sim.edges.index(e)))
 
         for e in sorted_edges:
@@ -270,7 +265,7 @@ class SimVisualizer:
             ev_preempted = getattr(lt, "ev_preempted", False)
 
             if ev_preempted:
-                #fast strobe between bright yellow-white and state color to signal EV override
+                #destello rápido entre amarillo-blanco brillante y color de estado para señalar anulación de EV
                 flash = (math.sin(t_total * math.pi * 8) > 0)
                 col = LIGHT_EV if flash else (LIGHT_GREEN if state == "green" else LIGHT_RED)
                 glow_r = r_lt + max(2, int(3 * scale))
@@ -287,18 +282,18 @@ class SimVisualizer:
         car_w = max(3, int(9 * scale))
         car_h = max(2, int(4 * scale))
 
-        #build queue map: count cars ahead on each road segment
-        road_queue_pos = {}  #maps (node_a, node_b) -> {car_id: queue_position}
+        #construye mapa de cola: cuenta coches delante en cada segmento de carretera
+        road_queue_pos = {}  #mapea (node_a, node_b) -> {car_id: queue_position}
         for car in sim.cars:
             key = (car.node_a, car.node_b)
             if key not in road_queue_pos:
                 road_queue_pos[key] = {}
             road_queue_pos[key][car.id] = None
         
-        #assign queue positions for cars on same road (closer to end = higher position)
+        #asigna posiciones de cola para coches en la misma carretera (más cerca del final = posición más alta)
         for key, cars_dict in road_queue_pos.items():
             car_list = [(car.progress, car_id) for car_id, car in [(cid, next(c for c in sim.cars if c.id == cid)) for cid in cars_dict.keys()]]
-            car_list.sort(reverse=True)  #sort by progress, descending
+            car_list.sort(reverse=True)  #ordena por progreso, descendente
             for queue_idx, (_, car_id) in enumerate(car_list):
                 cars_dict[car_id] = queue_idx
 
@@ -308,17 +303,17 @@ class SimVisualizer:
             if na is None or nb is None:
                 continue
             
-            #get base position
+            #obtén la posición base
             base_x, base_y = car.get_xy()
             edge_len = car.edge_length()
             
-            #if car is waiting and there are cars ahead, back it up to show queue
+            #si el coche espera y hay coches delante, retrocede para mostrar la cola
             if car.waiting:
                 key = (car.node_a, car.node_b)
                 queue_pos = road_queue_pos.get(key, {}).get(car.id, 0)
                 if queue_pos > 0:
-                    #back up by queue_pos * spacing along the road
-                    spacing = 0.035  #normalized spacing per car
+                    #retrocede por queue_pos * espaciado a lo largo de la carretera
+                    spacing = 0.035  #espaciado normalizado por coche
                     backup_progress = car.progress - (spacing * queue_pos)
                     if backup_progress >= 0:
                         dx = nb["x"] - na["x"]
@@ -333,7 +328,7 @@ class SimVisualizer:
             perp_y = math.cos(angle)
 
             lane_off = (car.lane - 1.5) * max(2, int(4 * scale))
-            #yielding cars get pushed far to the right so it's very visible
+            #los coches que ceden se empujan hacia la derecha para que sea muy visible
             yield_off = getattr(car, "yield_offset", 0.0)
             pull_over = yield_off * max(4, int(10 * scale))
             total_off = lane_off + pull_over
@@ -348,7 +343,7 @@ class SimVisualizer:
         x, y = ev.get_xy()
         sx, sy = to_screen(x, y)
 
-        #pulsing blue/red siren glow
+        #brillo de sirena azul/rojo pulsante
         siren_phase = (math.sin(t_total * math.pi * 4) + 1) / 2
         siren_col = _lerp_color(EV_SIREN_A, EV_SIREN_B, siren_phase)
         glow_r = max(10, int(28 * scale))

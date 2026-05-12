@@ -18,13 +18,13 @@ LIGHT_STOP_DIST = 0.88
 
 CAR_MIN_GAP = 0.045
 
-#how far ahead the EV preempts traffic lights (world units)
+#distancia maxima a la que el VE preempta los semaforos (unidades del mundo)
 EV_PREEMPT_RADIUS = 220.0
-#how far cars start pulling over for the EV
+#distancia a la que los coches empiezan a apartarse para el VE
 EV_YIELD_RADIUS = 160.0
 EV_YIELD_SPEED_FACTOR = 0.15
 
-#how often to rebuild traffic-aware adj for car rerouting (seconds)
+#cada cuanto se reconstruye la adyacencia con conciencia de trafico para reroutar coches (segundos)
 ADJ_REBUILD_INTERVAL = 8.0
 
 
@@ -36,7 +36,7 @@ class TrafficLight:
         self._state = "red"
         self._timer = 0.0
         self.override = None
-        #flag set by EV preemption so visualizer can highlight it differently
+        #flag activado por la preempcion del VE para que el visualizador lo resalte de forma diferente
         self.ev_preempted = False
 
     def tick(self, dt):
@@ -133,7 +133,7 @@ class IntersectionController:
         return lt.get_state() == "green"
 
     def preempt_for_ev(self, approach_dir):
-        #force all lights at this intersection to clear the way for EV approach direction
+        #forzar todos los semaforos de esta interseccion para despejar el camino al VE
         for d, lt in self.lights.items():
             if d == approach_dir:
                 lt.set_override("green", LIGHT_GREEN_DUR + LIGHT_ALLRED_DUR, ev=True)
@@ -161,19 +161,19 @@ class Car:
         self.progress = 0.0
         self.waiting = False
         self.yielding_to_ev = False
-        #yield_offset is a lateral offset fraction used by the visualizer to show pull-over
+        #yield_offset es una fraccion de desplazamiento lateral usada por el visualizador para mostrar el apartado
         self.yield_offset = 0.0
 
         self.node_map = node_map
         self.edge_map = edge_map
-        self.adj_ref = adj_ref  #mutable reference: list of [adj_dict]
+        self.adj_ref = adj_ref  #referencia mutable: lista de [adj_dict]
         self.all_nodes = all_nodes
 
         self.route = []
         self.route_idx = 0
         self.lane = random.randint(1, 2)
-        
-        #random speed variance: ±12% (some cars faster, some slower)
+
+        #variacion aleatoria de velocidad: +-12% (algunos coches mas rapidos, otros mas lentos)
         self.speed_factor = random.uniform(0.88, 1.12)
 
         edge = edge_map.get((node_a_id, node_b_id))
@@ -191,7 +191,7 @@ class Car:
 
     def reroute(self):
         dest = random.choice(self.all_nodes)["id"]
-        #use current traffic-aware adj from the shared reference
+        #usar la adyacencia con conciencia de trafico actual desde la referencia compartida
         route = dijkstra(self.adj_ref[0], self.node_b, dest)
         if len(route) >= 2:
             self.route = route
@@ -312,7 +312,7 @@ class Simulation:
                 phase_offset = random.uniform(0, 30)
                 self.intersections[nid] = IntersectionController(nid, lights_at_node, phase_offset)
 
-        #spawn initial traffic
+        #generar trafico inicial
         for _ in range(MAX_CARS):
             a_node = random.choice(self.nodes)
             b_node = random.choice(self.nodes)
@@ -335,11 +335,11 @@ class Simulation:
         if ctrl is None:
             return False
 
-        #check lights starting from further back: either within 50 units OR last 15% of road
+        #comprobar semaforos desde mas atras: dentro de 50 unidades O ultimo 15% de la calle
         edge_len = car.edge_length()
         normalized_stop_dist = LIGHT_STOP_DIST / edge_len
         check_threshold = min(0.15, max(normalized_stop_dist, 50.0 / edge_len))
-        
+
         if car.progress < 1.0 - check_threshold:
             return False
 
@@ -360,11 +360,11 @@ class Simulation:
         return dist < EV_YIELD_RADIUS
 
     def _preempt_ev_lights(self):
-        #force green for the EV on all intersections it's approaching within radius
+        #forzar verde para el VE en todas las intersecciones que se aproxima dentro del radio
         if self.ev is None:
             return
         ex, ey = self.ev.get_xy()
-        #look ahead through the next few route nodes
+        #mirar hacia adelante a traves de los siguientes nodos de la ruta
         for step in range(min(3, len(self.ev.route) - self.ev.route_idx - 1)):
             ahead_idx = self.ev.route_idx + 1 + step
             if ahead_idx >= len(self.ev.route):
@@ -379,7 +379,7 @@ class Simulation:
             ctrl = self.intersections.get(next_nid)
             if ctrl is None:
                 continue
-            #figure out the direction the EV is approaching from
+            #determinar la direccion desde la que el VE se aproxima
             if ahead_idx > 0:
                 prev_nid = self.ev.route[ahead_idx - 1]
                 prev_node = self.node_map.get(prev_nid)
@@ -397,7 +397,7 @@ class Simulation:
         dt = min(now - self.last_tick, 0.15)
         self.last_tick = now
 
-        #rebuild traffic-aware routing adj periodically
+        #reconstruir adyacencia con conciencia de trafico periodicamente
         if now - self._last_adj_rebuild > ADJ_REBUILD_INTERVAL:
             self._rebuild_traffic_adj()
             self._last_adj_rebuild = now
@@ -405,7 +405,7 @@ class Simulation:
         for ctrl in self.intersections.values():
             ctrl.tick(dt)
 
-        #preempt lights ahead of EV every tick
+        #preemptar semaforos por delante del VE en cada tick
         self._preempt_ev_lights()
 
         edge_idx = self._build_edge_index()
@@ -416,7 +416,7 @@ class Simulation:
 
             if car.yielding_to_ev:
                 car.waiting = False
-                #animate yield_offset toward max pull-over position
+                #animar yield_offset hacia la posicion maxima de apartado
                 car.yield_offset = min(1.0, car.yield_offset + dt * 2.5)
                 yield_speed = car._base_speed * EV_YIELD_SPEED_FACTOR * car.speed_factor
                 car.progress += (yield_speed * dt) / car.edge_length()
@@ -424,7 +424,7 @@ class Simulation:
                     car.progress = 0.94
                 continue
             else:
-                #smoothly return to normal lane
+                #volver suavemente al carril normal
                 if car.yield_offset > 0:
                     car.yield_offset = max(0.0, car.yield_offset - dt * 1.5)
 
@@ -441,13 +441,13 @@ class Simulation:
                     if ahead_progress is None or other.progress < ahead_progress:
                         ahead_progress = other.progress
 
-            #lookahead: if near end of current edge, check cars on next edge
+            #lookahead: si esta cerca del final del tramo actual, comprobar coches en el siguiente
             if car.progress > 0.85 and car.route_idx + 1 < len(car.route) - 1:
                 next_edge_key = (car.route[car.route_idx + 1], car.route[car.route_idx + 2])
                 next_edge_cars = edge_idx.get(next_edge_key, [])
                 for other in next_edge_cars:
-                    if other.progress < 0.15:  #car very near start of next edge
-                        #pretend it's at 1.0 + their progress on next edge
+                    if other.progress < 0.15:  #coche muy cerca del inicio del siguiente tramo
+                        #tratarlo como si estuviera en 1.0 + su progreso en el siguiente tramo
                         virtual_progress = 1.0 + other.progress
                         if ahead_progress is None or virtual_progress < ahead_progress:
                             ahead_progress = virtual_progress
@@ -465,26 +465,26 @@ class Simulation:
 
             car.waiting = False
             car.progress += (effective_speed * car.speed_factor * dt) / car.edge_length()
-            
-            #clamp to 1.0 to prevent snapping, check each frame if we can move to next edge
+
+            #limitar a 1.0 para evitar saltos, comprobar cada frame si puede avanzar al siguiente tramo
             if car.progress >= 1.0:
                 car.progress = 1.0
-                #only transition to next edge if destination intersection is clear
+                #solo pasar al siguiente tramo si la interseccion de destino esta libre
                 if car.route_idx + 1 < len(car.route) - 1:
                     next_node_a = car.route[car.route_idx + 1]
                     next_node_b = car.route[car.route_idx + 2]
                     next_edge_key = (next_node_a, next_node_b)
                     next_edge_cars = edge_idx.get(next_edge_key, [])
-                    
-                    #check if next edge is clear (no car too close to start)
+
+                    #comprobar si el siguiente tramo esta libre (ningun coche demasiado cerca del inicio)
                     next_clear = True
                     for other in next_edge_cars:
-                        if other.progress < 0.1:  #car is at start of next edge
+                        if other.progress < 0.1:  #coche al inicio del siguiente tramo
                             next_clear = False
                             break
-                    
+
                     if next_clear:
-                        #safe to move to next edge
+                        #seguro avanzar al siguiente tramo
                         car.progress = 0.0
                         car.route_idx += 1
                         if car.route_idx >= len(car.route) - 1:
@@ -499,7 +499,7 @@ class Simulation:
                             edge_idx[key] = []
                         edge_idx[key].append(car)
                 else:
-                    #end of route, reroute
+                    #fin de ruta, reroutar
                     car.route_idx += 1
                     if car.route_idx >= len(car.route) - 1:
                         car.reroute()
@@ -516,11 +516,10 @@ class Simulation:
         return ev_done
 
     def start_route(self, from_id, to_id):
-        #find nearest node (main or secondary) to the given coordinates
-        #if from_id or to_id are already valid node ids, use them directly
+        #si from_id o to_id son ids de nodo validos, usarlos directamente
         from_node = self.node_map.get(from_id)
         to_node = self.node_map.get(to_id)
-        
+
         if from_node is None:
             return False
         if to_node is None:
@@ -570,15 +569,15 @@ class Simulation:
             eid = edge_id_map.get((car.node_a, car.node_b))
             if eid is None:
                 continue
-            
-            #mark as waiting if: stopped at light OR barely moving (congested)
+
+            #marcar como esperando si: parado en semaforo O apenas moviendose (congestionado)
             is_waiting = car.waiting or car.yielding_to_ev
-            
-            #also count cars as waiting if they're very close to destination (95%+ progress)
-            #this catches congestion at intersections without lights
+
+            #tambien contar coches como esperando si estan muy cerca del destino (95%+ de progreso)
+            #esto captura congestion en intersecciones sin semaforos
             if car.progress > 0.95:
                 is_waiting = True
-            
+
             speed_sums[eid] += 0.0 if is_waiting else car._base_speed
             speed_counts[eid] += 1
             if is_waiting:
@@ -595,59 +594,59 @@ class Simulation:
             else:
                 avg = speed_sums[eid] / count
                 max_speed = max_speeds[eid]
-                
-                #speed degradation: 0 = full speed, 1 = standstill
+
+                #degradacion de velocidad: 0 = velocidad maxima, 1 = parada total
                 speed_factor = max(0.0, 1.0 - (avg / max_speed))
-                
-                #vehicle density: cars per unit length (normalized)
-                #more sensitive: even a few cars should show some color
+
+                #densidad de vehiculos: coches por unidad de longitud (normalizado)
+                #mas sensible: incluso pocos coches deben mostrar algo de color
                 edge_obj = self.edge_map.get((e["from"], e["to"]))
                 if edge_obj:
                     edge_len = max(1.0, math.hypot(
                         self.node_map[e["to"]]["x"] - self.node_map[e["from"]]["x"],
                         self.node_map[e["to"]]["y"] - self.node_map[e["from"]]["y"]
                     ))
-                    #capacity: 1 car per ~30 units = visible, 5+ cars = full
+                    #capacidad: 1 coche cada ~30 unidades = visible, 5+ coches = maximo
                     vehicle_density = min(1.0, (count * 30.0) / edge_len)
                 else:
                     vehicle_density = count / 10.0  #fallback
-                
-                #minimum presence: any car on road adds at least 0.05 density (slight color)
+
+                #presencia minima: cualquier coche en la calle añade al menos 0.05 de densidad
                 min_presence = 0.05 if count > 0 else 0.0
-                
-                #smooth waiting car-based signalling with interpolation
-                #key points: (waiting_count, density_value)
+
+                #señalizacion suavizada basada en coches esperando con interpolacion
+                #puntos clave: (numero_coches_esperando, valor_densidad)
                 waiting = waiting_counts[eid]
                 waiting_points = [
-                    (0, 0.0),      #no cars
-                    (2, 0.25),     #barely yellow
-                    (4, 0.48),     #yellow
-                    (7, 0.70),     #yellow to red
-                    (10, 0.95),    #red
+                    (0, 0.0),      #sin coches
+                    (2, 0.25),     #apenas amarillo
+                    (4, 0.48),     #amarillo
+                    (7, 0.70),     #amarillo a rojo
+                    (10, 0.95),    #rojo
                 ]
-                
-                #interpolate between key points
+
+                #interpolar entre puntos clave
                 waiting_density = 0.0
                 if waiting > 0:
                     for i in range(len(waiting_points) - 1):
                         w1, d1 = waiting_points[i]
                         w2, d2 = waiting_points[i + 1]
                         if w1 <= waiting <= w2:
-                            #linear interpolation
+                            #interpolacion lineal
                             t = (waiting - w1) / (w2 - w1) if w2 > w1 else 0.0
                             waiting_density = d1 + (d2 - d1) * t
                             break
                     else:
-                        #beyond last point
+                        #mas alla del ultimo punto
                         waiting_density = waiting_points[-1][1]
-                
-                #combine: prioritize waiting car signal, but also consider speed/vehicle flow
-                #if many cars are actually waiting, let that dominate; otherwise use speed/density
+
+                #combinar: priorizar señal de coches esperando, pero considerar tambien velocidad y flujo
+                #si muchos coches estan realmente esperando, dejar que eso domine; si no, usar velocidad y densidad
                 if waiting > 0:
                     raw_densities[eid] = (waiting_density * 0.8) + (speed_factor * 0.2)
                 else:
-                    #boost vehicle presence more when no waiting: 60% speed, 40% presence
-                    #but ensure minimum visibility if cars are present
+                    #aumentar presencia de vehiculos cuando no hay espera: 60% velocidad, 40% presencia
+                    #garantizar visibilidad minima si hay coches presentes
                     raw_densities[eid] = max(min_presence, (speed_factor * 0.6) + (vehicle_density * 0.4))
 
         #suavizar con media movil exponencial
