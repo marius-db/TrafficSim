@@ -35,7 +35,7 @@ CentralCore puede enviar tres tipos de comandos:
 Instalar dependencias:
 
 ```
-pip install websockets pygame fastapi
+pip install websockets pygame
 ```
 
 pygame es opcional. Si no está instalado el servidor funciona igualmente, simplemente no abre la ventana visual.
