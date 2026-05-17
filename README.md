@@ -35,7 +35,7 @@ CentralCore can send three types of commands back:
 Install dependencies:
 
 ```
-pip install websockets pygame fastapi
+pip install websockets pygame
 ```
 
 pygame is optional. If it's not installed the server still runs fine, it just won't open the visual window.
